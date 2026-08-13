@@ -1,5 +1,5 @@
-const { spawn } = require('node:child_process');
-const core = require('@actions/core');
+import { spawn } from 'node:child_process';
+import * as core from '@actions/core';
 
 /**
  * Executes a command and returns its result as promise
@@ -11,6 +11,7 @@ const core = require('@actions/core');
 const exec = (cmd, args = [], options = {}) =>
 	new Promise((resolve, reject) => {
 		let outputData = '';
+		let errorData = '';
 		const optionsToCLI = {
 			...options,
 		};
@@ -24,14 +25,19 @@ const exec = (cmd, args = [], options = {}) =>
 				outputData += data.toString();
 			});
 		}
+		if (app.stderr) {
+			app.stderr.on('data', (data) => {
+				errorData += data.toString();
+			});
+		}
 
 		app.on('close', (code) => {
 			if (code !== 0) {
-				return reject({ code, outputData });
+				return reject({ code, outputData, errorData });
 			}
-			return resolve({ code, outputData });
+			return resolve({ code, outputData, errorData });
 		});
-		app.on('error', () => reject({ code: 1, outputData }));
+		app.on('error', () => reject({ code: 1, outputData, errorData }));
 	});
 
 /**
@@ -98,26 +104,45 @@ const truncateString = (str, length) => {
  * @param readmeFilePaths {string[]} path to the readme file
  * @return {Promise<void>}
  */
-const commitReadme = async (githubToken, readmeFilePaths) => {
+const commitReadme = async (githubToken, readmeFilePaths, execFn = exec) => {
 	// Getting config
 	const committerUsername = core.getInput('committer_username');
 	const committerEmail = core.getInput('committer_email');
 	const commitMessage = core.getInput('commit_message');
 	// Doing commit and push
-	await exec('git', ['config', '--global', 'user.email', committerEmail]);
+	await execFn('git', ['config', '--global', 'user.email', committerEmail]);
 	if (githubToken) {
 		// git remote set-url origin
-		await exec('git', [
+		await execFn('git', [
 			'remote',
 			'set-url',
 			'origin',
 			`https://${githubToken}@github.com/${process.env.GITHUB_REPOSITORY}.git`,
 		]);
 	}
-	await exec('git', ['config', '--global', 'user.name', committerUsername]);
-	await exec('git', ['add', ...readmeFilePaths]);
-	await exec('git', ['commit', '-m', commitMessage]);
-	await exec('git', ['push']);
+	await execFn('git', ['config', '--global', 'user.name', committerUsername]);
+	await execFn('git', ['add', ...readmeFilePaths]);
+	await execFn('git', ['commit', '-m', commitMessage]);
+	try {
+		await execFn('git', ['push'], { stdio: ['pipe', 'pipe', 'pipe'] });
+	} catch (err) {
+		const errorOutput = err.errorData || '';
+		if (
+			errorOutput.includes('403') ||
+			errorOutput.toLowerCase().includes('permission') ||
+			errorOutput.toLowerCase().includes('denied')
+		) {
+			core.error(
+				'Push failed due to insufficient permissions. Please add `contents: write` permission to your workflow file:\n\n' +
+					'permissions:\n' +
+					'  contents: write\n\n' +
+					'See: https://github.com/gautamkrishnar/blog-post-workflow#readme',
+			);
+		}
+		throw new Error(
+			`git push failed with exit code ${err.code}: ${errorOutput}`,
+		);
+	}
 	core.info('Readme updated successfully in the upstream repository');
 };
 
@@ -208,13 +233,13 @@ const categoriesToArray = (categories) => {
 	return categoriesStr;
 };
 
-module.exports = {
-	updateAndParseCompoundParams,
-	commitReadme,
-	truncateString,
+export {
 	buildReadme,
+	categoriesToArray,
+	commitReadme,
+	escapeHTML,
 	exec,
 	getParameterisedTemplate,
-	escapeHTML,
-	categoriesToArray,
+	truncateString,
+	updateAndParseCompoundParams,
 };
